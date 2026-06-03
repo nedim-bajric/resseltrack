@@ -1,0 +1,92 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ResellTrack Design Tokens */
+    --bg-primary: #0B0D12;
+    --bg-surface: #11131A;
+    --bg-surface-hover: #1A1D26;
+    --bg-surface-active: #222633;
+    --bg-input: #0D0F14;
+    --bg-sidebar: #090A10;
+
+    --text-primary: #E8EAF0;
+    --text-secondary: #8B8FA3;
+    --text-muted: #5C6078;
+    --text-inverse: #0B0D12;
+
+    --accent-primary: #6366F1;
+    --accent-primary-hover: #818CF8;
+    --accent-primary-subtle: rgba(99,102,241,0.12);
+    --accent-profit: #34D399;
+    --accent-profit-subtle: rgba(52,211,153,0.12);
+    --accent-cost: #FB7185;
+    --accent-cost-subtle: rgba(251,113,133,0.12);
+    --accent-warning: #FBBF24;
+    --accent-warning-subtle: rgba(251,191,36,0.12);
+    --accent-info: #38BDF8;
+    --accent-info-subtle: rgba(56,189,248,0.12);
+
+    --border-default: #1E2130;
+    --border-hover: #2E3250;
+    --border-focus: #6366F1;
+
+    --chart-1: #6366F1;
+    --chart-2: #34D399;
+    --chart-3: #FB7185;
+    --chart-4: #FBBF24;
+    --chart-5: #38BDF8;
+    --chart-grid: #1E2130;
+
+    /* Shadcn overrides */
+    --background: 228 25% 5%;
+    --foreground: 228 20% 93%;
+    --card: 228 20% 7%;
+    --card-foreground: 228 20% 93%;
+    --popover: 228 20% 7%;
+    --popover-foreground: 228 20% 93%;
+    --primary: 239 84% 67%;
+    --primary-foreground: 228 25% 5%;
+    --secondary: 228 15% 12%;
+    --secondary-foreground: 228 20% 93%;
+    --muted: 228 15% 12%;
+    --muted-foreground: 231 12% 52%;
+    --accent: 228 15% 12%;
+    --accent-foreground: 228 20% 93%;
+    --destructive: 350 89% 60%;
+    --destructive-foreground: 228 20% 93%;
+    --border: 228 20% 15%;
+    --input: 228 20% 7%;
+    --ring: 239 84% 67%;
+    --radius: 0.625rem;
+    --sidebar-background: 228 25% 4%;
+    --sidebar-foreground: 228 20% 93%;
+    --sidebar-primary: 239 84% 67%;
+    --sidebar-primary-foreground: 228 25% 5%;
+    --sidebar-accent: 228 15% 12%;
+    --sidebar-accent-foreground: 228 20% 93%;
+    --sidebar-border: 228 20% 15%;
+    --sidebar-ring: 239 84% 67%;
+  }
+
+  * {
+    @apply border-[#1E2130];
+  }
+
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+}

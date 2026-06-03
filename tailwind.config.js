@@ -1,0 +1,132 @@
+/** @type {import('tailwindcss').Config} */
+module.exports = {
+  darkMode: ["class"],
+  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  theme: {
+    extend: {
+      colors: {
+        border: "hsl(var(--border))",
+        input: "hsl(var(--input))",
+        ring: "hsl(var(--ring))",
+        background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))",
+        primary: {
+          DEFAULT: "hsl(var(--primary))",
+          foreground: "hsl(var(--primary-foreground))",
+        },
+        secondary: {
+          DEFAULT: "hsl(var(--secondary))",
+          foreground: "hsl(var(--secondary-foreground))",
+        },
+        destructive: {
+          DEFAULT: "hsl(var(--destructive) / <alpha-value>)",
+          foreground: "hsl(var(--destructive-foreground) / <alpha-value>)",
+        },
+        muted: {
+          DEFAULT: "hsl(var(--muted))",
+          foreground: "hsl(var(--muted-foreground))",
+        },
+        accent: {
+          DEFAULT: "hsl(var(--accent))",
+          foreground: "hsl(var(--accent-foreground))",
+        },
+        popover: {
+          DEFAULT: "hsl(var(--popover))",
+          foreground: "hsl(var(--popover-foreground))",
+        },
+        card: {
+          DEFAULT: "hsl(var(--card))",
+          foreground: "hsl(var(--card-foreground))",
+        },
+        sidebar: {
+          DEFAULT: "hsl(var(--sidebar-background))",
+          foreground: "hsl(var(--sidebar-foreground))",
+          primary: "hsl(var(--sidebar-primary))",
+          "primary-foreground": "hsl(var(--sidebar-primary-foreground))",
+          accent: "hsl(var(--sidebar-accent))",
+          "accent-foreground": "hsl(var(--sidebar-accent-foreground))",
+          border: "hsl(var(--sidebar-border))",
+          ring: "hsl(var(--sidebar-ring))",
+        },
+        // ResellTrack custom design tokens
+        rt: {
+          'bg-primary': '#0B0D12',
+          'bg-surface': '#11131A',
+          'bg-surface-hover': '#1A1D26',
+          'bg-surface-active': '#222633',
+          'bg-input': '#0D0F14',
+          'bg-sidebar': '#090A10',
+          'text-primary': '#E8EAF0',
+          'text-secondary': '#8B8FA3',
+          'text-muted': '#5C6078',
+          'text-inverse': '#0B0D12',
+          'accent': '#6366F1',
+          'accent-hover': '#818CF8',
+          'accent-subtle': 'rgba(99,102,241,0.12)',
+          'profit': '#34D399',
+          'profit-subtle': 'rgba(52,211,153,0.12)',
+          'cost': '#FB7185',
+          'cost-subtle': 'rgba(251,113,133,0.12)',
+          'warning': '#FBBF24',
+          'warning-subtle': 'rgba(251,191,36,0.12)',
+          'info': '#38BDF8',
+          'info-subtle': 'rgba(56,189,248,0.12)',
+          'border-default': '#1E2130',
+          'border-hover': '#2E3250',
+          'border-focus': '#6366F1',
+          'chart-1': '#6366F1',
+          'chart-2': '#34D399',
+          'chart-3': '#FB7185',
+          'chart-4': '#FBBF24',
+          'chart-5': '#38BDF8',
+          'chart-grid': '#1E2130',
+        },
+      },
+      fontFamily: {
+        sans: ['Inter', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'monospace'],
+      },
+      spacing: {
+        'rt-1': '4px',
+        'rt-2': '8px',
+        'rt-3': '12px',
+        'rt-4': '16px',
+        'rt-5': '20px',
+        'rt-6': '24px',
+        'rt-8': '32px',
+        'rt-10': '40px',
+        'rt-12': '48px',
+      },
+      borderRadius: {
+        xl: "calc(var(--radius) + 4px)",
+        lg: "var(--radius)",
+        md: "calc(var(--radius) - 2px)",
+        sm: "calc(var(--radius) - 4px)",
+        xs: "calc(var(--radius) - 6px)",
+      },
+      boxShadow: {
+        xs: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
+      },
+      keyframes: {
+        "accordion-down": {
+          from: { height: "0" },
+          to: { height: "var(--radix-accordion-content-height)" },
+        },
+        "accordion-up": {
+          from: { height: "var(--radix-accordion-content-height)" },
+          to: { height: "0" },
+        },
+        "caret-blink": {
+          "0%,70%,100%": { opacity: "1" },
+          "20%,50%": { opacity: "0" },
+        },
+      },
+      animation: {
+        "accordion-down": "accordion-down 0.2s ease-out",
+        "accordion-up": "accordion-up 0.2s ease-out",
+        "caret-blink": "caret-blink 1.25s ease-out infinite",
+      },
+    },
+  },
+  plugins: [require("tailwindcss-animate")],
+}
