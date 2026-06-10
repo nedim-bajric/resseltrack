@@ -388,7 +388,11 @@ const CreateOrder: React.FC = () => {
       date: form.date,
     };
 
-    await addOrder(orderData);
+    const newOrder = await addOrder(orderData);
+    if (!newOrder) {
+      toast.error('Failed to create order');
+      return;
+    }
 
     // 2. Decrease inventory
     await sellProductQuantity(form.productId, quantity, form.optionId || undefined);

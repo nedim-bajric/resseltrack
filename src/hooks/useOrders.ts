@@ -94,6 +94,7 @@ export function useOrders() {
         notes: orderData.notes ?? null,
         status: 'shipped',
         date: orderData.date,
+        user_id: user?.id,
       };
 
       const { data, error: dbError } = await supabase
