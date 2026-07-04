@@ -17,12 +17,27 @@ import type { ProductOption } from '@/types';
 const CATEGORIES = ['Clothing', 'Accessories', 'Home', 'Electronics', 'Other'];
 const SOURCES = ['Temu', 'AliExpress', 'Amazon', 'Local Store', 'Other'];
 
+interface OptionBatchRow {
+  id: string;
+  quantity: number;
+  buyPrice: string;
+}
+
 interface OptionRow {
   id: string;
   color: string;
   size: string;
-  quantity: number;
+  batches: OptionBatchRow[];
 }
+
+const optionTotalQuantity = (o: OptionRow) =>
+  o.batches.reduce((sum, b) => sum + (parseInt(String(b.quantity)) || 0), 0);
+
+const batchTotalCost = (o: OptionRow, fallbackBuyPrice: number) =>
+  o.batches.reduce((sum, b) => {
+    const price = b.buyPrice ? parseFloat(b.buyPrice) || fallbackBuyPrice : fallbackBuyPrice;
+    return sum + price * (parseInt(String(b.quantity)) || 0);
+  }, 0);
 
 /* ------------------------------------------------------------------ */
 /*  Add Item Page                                                     */
@@ -59,37 +74,80 @@ const AddItem: React.FC = () => {
 
   const totalQuantity = useMemo(() => {
     if (hasOptions && options.length > 0) {
-      return options.reduce((sum, o) => sum + (parseInt(String(o.quantity)) || 0), 0);
+      return options.reduce((sum, o) => sum + optionTotalQuantity(o), 0);
     }
     return baseQtyNum;
   }, [hasOptions, options, baseQtyNum]);
 
-  const profitPerUnit = targetPriceNum - buyPriceNum;
-  const marginPercent = buyPriceNum > 0 ? (profitPerUnit / buyPriceNum) * 100 : 0;
-  const totalCost = buyPriceNum * totalQuantity;
+  const totalCost = useMemo(() => {
+    if (hasOptions && options.length > 0) {
+      return options.reduce((sum, o) => sum + batchTotalCost(o, buyPriceNum), 0);
+    }
+    return buyPriceNum * totalQuantity;
+  }, [hasOptions, options, buyPriceNum, totalQuantity]);
   const totalRevenue = targetPriceNum * totalQuantity;
-  const totalProfit = profitPerUnit * totalQuantity;
+  const totalProfit = totalRevenue - totalCost;
+  const avgCost = totalQuantity > 0 ? totalCost / totalQuantity : 0;
+  const profitPerUnit = targetPriceNum - avgCost;
+  const marginPercent = avgCost > 0 ? (profitPerUnit / avgCost) * 100 : 0;
   const discountPercent = originalPriceNum > 0 ? ((originalPriceNum - targetPriceNum) / originalPriceNum) * 100 : 0;
 
   /* -- Options management -- */
+  const makeBatch = (): OptionBatchRow => ({
+    id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    quantity: 1,
+    buyPrice: buyPrice,
+  });
+
   const addOption = () => {
     const newOption: OptionRow = {
       id: `opt-${Date.now()}`,
       color: '',
       size: '',
-      quantity: 1,
+      batches: [makeBatch()],
     };
     setOptions((prev) => [...prev, newOption]);
   };
 
-  const updateOption = (id: string, field: keyof OptionRow, value: string | number) => {
+  const removeOption = (id: string) => {
+    setOptions((prev) => prev.filter((o) => o.id !== id));
+  };
+
+  const updateOptionColor = (id: string, color: string) => {
+    setOptions((prev) => prev.map((o) => (o.id === id ? { ...o, color } : o)));
+  };
+
+  const updateOptionSize = (id: string, size: string) => {
+    setOptions((prev) => prev.map((o) => (o.id === id ? { ...o, size } : o)));
+  };
+
+  const addBatch = (optionId: string) => {
     setOptions((prev) =>
-      prev.map((o) => (o.id === id ? { ...o, [field]: value } : o))
+      prev.map((o) => (o.id === optionId ? { ...o, batches: [...o.batches, makeBatch()] } : o))
     );
   };
 
-  const removeOption = (id: string) => {
-    setOptions((prev) => prev.filter((o) => o.id !== id));
+  const removeBatch = (optionId: string, batchId: string) => {
+    setOptions((prev) =>
+      prev.map((o) =>
+        o.id === optionId
+          ? { ...o, batches: o.batches.filter((b) => b.id !== batchId) }
+          : o
+      )
+    );
+  };
+
+  const updateBatch = (optionId: string, batchId: string, field: keyof OptionBatchRow, value: string | number) => {
+    setOptions((prev) =>
+      prev.map((o) =>
+        o.id === optionId
+          ? {
+              ...o,
+              batches: o.batches.map((b) => (b.id === batchId ? { ...b, [field]: value } : b)),
+            }
+          : o
+      )
+    );
   };
 
   /* -- Validation -- */
@@ -103,8 +161,8 @@ const AddItem: React.FC = () => {
     if (!baseQuantity || parseInt(baseQuantity) < 1) newErrors.baseQuantity = 'Quantity must be at least 1';
 
     if (hasOptions && options.length > 0) {
-      const allHaveQty = options.every((o) => (parseInt(String(o.quantity)) || 0) > 0);
-      if (!allHaveQty) newErrors.options = 'All options must have a quantity greater than 0';
+      const allHaveBatches = options.every((o) => o.batches.length > 0 && o.batches.every((b) => (parseInt(String(b.quantity)) || 0) > 0));
+      if (!allHaveBatches) newErrors.options = 'Every variant must have at least one batch with quantity greater than 0';
     }
 
     setErrors(newErrors);
@@ -124,14 +182,27 @@ const AddItem: React.FC = () => {
     // Build options
     let productOptions: ProductOption[] = [];
     if (hasOptions && options.length > 0) {
-      productOptions = options.map((o) => ({
-        id: o.id,
-        name: `${o.color || ''} ${o.size || ''}`.trim() || 'Default',
-        color: o.color || undefined,
-        size: o.size || undefined,
-        quantity: parseInt(String(o.quantity)) || 0,
-        soldQuantity: 0,
-      }));
+      productOptions = options.map((o) => {
+        const batches = o.batches.map((b) => {
+          const qty = parseInt(String(b.quantity)) || 0;
+          return {
+            id: b.id,
+            quantity: qty,
+            remaining: qty,
+            buyPrice: b.buyPrice ? parseFloat(b.buyPrice) || buyPriceNum : buyPriceNum,
+          };
+        });
+        const qty = batches.reduce((sum, b) => sum + b.quantity, 0);
+        return {
+          id: o.id,
+          name: `${o.color || ''} ${o.size || ''}`.trim() || 'Default',
+          color: o.color || undefined,
+          size: o.size || undefined,
+          quantity: qty,
+          soldQuantity: 0,
+          batches,
+        };
+      });
     } else {
       // Single item - create one default option
       productOptions = [{
@@ -139,6 +210,14 @@ const AddItem: React.FC = () => {
         name: 'Default',
         quantity: baseQtyNum,
         soldQuantity: 0,
+        batches: [
+          {
+            id: `batch-${Date.now()}`,
+            quantity: baseQtyNum,
+            remaining: baseQtyNum,
+            buyPrice: buyPriceNum,
+          },
+        ],
       }];
     }
 
@@ -531,85 +610,129 @@ const AddItem: React.FC = () => {
                     </div>
                   ) : (
                     <div className="rounded-lg overflow-hidden mb-3" style={{ border: '1px solid #1E2130' }}>
-                      {/* Options table header */}
-                      <div className="flex items-center px-3" style={{ height: '36px', backgroundColor: '#090A10' }}>
-                        <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#5C6078', flex: '0 0 120px' }}>Color</span>
-                        <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#5C6078', flex: '0 0 100px' }}>Size</span>
-                        <span className="text-xs font-medium uppercase tracking-wider text-right" style={{ color: '#5C6078', flex: '0 0 80px' }}>Qty</span>
-                        <span className="text-xs font-medium uppercase tracking-wider text-right" style={{ color: '#5C6078', flex: '1' }}>Actions</span>
-                      </div>
-                      {/* Options rows */}
+                      {/* Options list */}
                       {options.map((option, idx) => (
                         <motion.div
                           key={option.id}
-                          initial={{ opacity: 0, scale: 0.8 }}
+                          initial={{ opacity: 0, scale: 0.98 }}
                           animate={{ opacity: 1, scale: 1 }}
                           transition={{ duration: 0.15, delay: idx * 0.03 }}
-                          className="flex items-center px-3 gap-2"
+                          className="p-3"
                           style={{
-                            height: '44px',
                             backgroundColor: '#11131A',
                             borderTop: '1px solid #1E2130',
                           }}
                         >
-                          <input
-                            type="text"
-                            placeholder="Color"
-                            value={option.color}
-                            onChange={(e) => updateOption(option.id, 'color', e.target.value)}
-                            className="rounded-md border text-sm outline-none px-2"
-                            style={{
-                              backgroundColor: '#0D0F14',
-                              borderColor: '#1E2130',
-                              color: '#E8EAF0',
-                              height: '32px',
-                              flex: '0 0 120px',
-                            }}
-                            onFocus={(e) => { e.currentTarget.style.borderColor = '#6366F1'; }}
-                            onBlur={(e) => { e.currentTarget.style.borderColor = '#1E2130'; }}
-                          />
-                          <input
-                            type="text"
-                            placeholder="Size"
-                            value={option.size}
-                            onChange={(e) => updateOption(option.id, 'size', e.target.value)}
-                            className="rounded-md border text-sm outline-none px-2"
-                            style={{
-                              backgroundColor: '#0D0F14',
-                              borderColor: '#1E2130',
-                              color: '#E8EAF0',
-                              height: '32px',
-                              flex: '0 0 100px',
-                            }}
-                            onFocus={(e) => { e.currentTarget.style.borderColor = '#6366F1'; }}
-                            onBlur={(e) => { e.currentTarget.style.borderColor = '#1E2130'; }}
-                          />
-                          <input
-                            type="number"
-                            min="0"
-                            step="1"
-                            value={option.quantity}
-                            onChange={(e) => updateOption(option.id, 'quantity', parseInt(e.target.value) || 0)}
-                            className="rounded-md border text-sm outline-none px-2 text-right font-mono"
-                            style={{
-                              backgroundColor: '#0D0F14',
-                              borderColor: '#1E2130',
-                              color: '#E8EAF0',
-                              height: '32px',
-                              flex: '0 0 80px',
-                            }}
-                            onFocus={(e) => { e.currentTarget.style.borderColor = '#6366F1'; }}
-                            onBlur={(e) => { e.currentTarget.style.borderColor = '#1E2130'; }}
-                          />
-                          <div className="flex justify-end" style={{ flex: 1 }}>
+                          {/* Variant header */}
+                          <div className="flex items-center gap-2 mb-2">
+                            <input
+                              type="text"
+                              placeholder="Color"
+                              value={option.color}
+                              onChange={(e) => updateOptionColor(option.id, e.target.value)}
+                              className="rounded-md border text-sm outline-none px-2"
+                              style={{
+                                backgroundColor: '#0D0F14',
+                                borderColor: '#1E2130',
+                                color: '#E8EAF0',
+                                height: '32px',
+                                flex: '0 0 120px',
+                              }}
+                              onFocus={(e) => { e.currentTarget.style.borderColor = '#6366F1'; }}
+                              onBlur={(e) => { e.currentTarget.style.borderColor = '#1E2130'; }}
+                            />
+                            <input
+                              type="text"
+                              placeholder="Size"
+                              value={option.size}
+                              onChange={(e) => updateOptionSize(option.id, e.target.value)}
+                              className="rounded-md border text-sm outline-none px-2"
+                              style={{
+                                backgroundColor: '#0D0F14',
+                                borderColor: '#1E2130',
+                                color: '#E8EAF0',
+                                height: '32px',
+                                flex: '0 0 100px',
+                              }}
+                              onFocus={(e) => { e.currentTarget.style.borderColor = '#6366F1'; }}
+                              onBlur={(e) => { e.currentTarget.style.borderColor = '#1E2130'; }}
+                            />
+                            <span className="text-xs" style={{ color: '#8B8FA3' }}>
+                              Total: <span className="font-mono" style={{ color: '#E8EAF0' }}>{optionTotalQuantity(option)}</span>
+                            </span>
+                            <div className="flex justify-end" style={{ flex: 1 }}>
+                              <button
+                                onClick={() => removeOption(option.id)}
+                                className="flex items-center justify-center rounded-md transition-colors duration-100"
+                                style={{ width: '28px', height: '28px', color: '#5C6078' }}
+                                onMouseEnter={(e) => { e.currentTarget.style.color = '#FB7185'; e.currentTarget.style.backgroundColor = 'rgba(251,113,133,0.12)'; }}
+                                onMouseLeave={(e) => { e.currentTarget.style.color = '#5C6078'; e.currentTarget.style.backgroundColor = 'transparent'; }}
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Batches */}
+                          <div className="space-y-2 pl-1">
+                            {option.batches.map((batch) => (
+                              <div key={batch.id} className="flex items-center gap-2">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  step="1"
+                                  placeholder="Qty"
+                                  value={batch.quantity}
+                                  onChange={(e) => updateBatch(option.id, batch.id, 'quantity', parseInt(e.target.value) || 0)}
+                                  className="rounded-md border text-sm outline-none px-2 text-right font-mono"
+                                  style={{
+                                    backgroundColor: '#0D0F14',
+                                    borderColor: '#1E2130',
+                                    color: '#E8EAF0',
+                                    height: '30px',
+                                    width: '70px',
+                                  }}
+                                  onFocus={(e) => { e.currentTarget.style.borderColor = '#6366F1'; }}
+                                  onBlur={(e) => { e.currentTarget.style.borderColor = '#1E2130'; }}
+                                />
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  placeholder="Buy KM"
+                                  value={batch.buyPrice}
+                                  onChange={(e) => updateBatch(option.id, batch.id, 'buyPrice', e.target.value)}
+                                  className="rounded-md border text-sm outline-none px-2 text-right font-mono"
+                                  style={{
+                                    backgroundColor: '#0D0F14',
+                                    borderColor: '#1E2130',
+                                    color: '#E8EAF0',
+                                    height: '30px',
+                                    width: '100px',
+                                  }}
+                                  onFocus={(e) => { e.currentTarget.style.borderColor = '#6366F1'; }}
+                                  onBlur={(e) => { e.currentTarget.style.borderColor = '#1E2130'; }}
+                                />
+                                <button
+                                  onClick={() => removeBatch(option.id, batch.id)}
+                                  className="flex items-center justify-center rounded-md transition-colors duration-100"
+                                  style={{ width: '26px', height: '26px', color: '#5C6078' }}
+                                  onMouseEnter={(e) => { e.currentTarget.style.color = '#FB7185'; e.currentTarget.style.backgroundColor = 'rgba(251,113,133,0.12)'; }}
+                                  onMouseLeave={(e) => { e.currentTarget.style.color = '#5C6078'; e.currentTarget.style.backgroundColor = 'transparent'; }}
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </div>
+                            ))}
                             <button
-                              onClick={() => removeOption(option.id)}
-                              className="flex items-center justify-center rounded-md transition-colors duration-100"
-                              style={{ width: '28px', height: '28px', color: '#5C6078' }}
-                              onMouseEnter={(e) => { e.currentTarget.style.color = '#FB7185'; e.currentTarget.style.backgroundColor = 'rgba(251,113,133,0.12)'; }}
-                              onMouseLeave={(e) => { e.currentTarget.style.color = '#5C6078'; e.currentTarget.style.backgroundColor = 'transparent'; }}
+                              onClick={() => addBatch(option.id)}
+                              className="inline-flex items-center gap-1 text-xs font-medium transition-colors duration-150"
+                              style={{ color: '#6366F1' }}
+                              onMouseEnter={(e) => { e.currentTarget.style.color = '#818CF8'; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.color = '#6366F1'; }}
                             >
-                              <Trash2 size={14} />
+                              <Plus size={12} />
+                              Add batch
                             </button>
                           </div>
                         </motion.div>

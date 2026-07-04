@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS product_options (
   color TEXT,
   size TEXT,
   quantity INTEGER NOT NULL DEFAULT 0,
-  sold_quantity INTEGER NOT NULL DEFAULT 0
+  sold_quantity INTEGER NOT NULL DEFAULT 0,
+  batches JSONB DEFAULT '[]'::jsonb
 );
 
 -- ═══════════════════════════════════════════════════════════════════
@@ -49,6 +50,7 @@ CREATE TABLE IF NOT EXISTS orders (
   quantity INTEGER NOT NULL,
   sell_price NUMERIC NOT NULL,
   total_amount NUMERIC NOT NULL,
+  buy_cost NUMERIC,
   platform TEXT NOT NULL,
   customer_name TEXT,
   notes TEXT,
@@ -121,3 +123,6 @@ ALTER TABLE products ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES auth.users
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE;
 ALTER TABLE costs ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS original_price NUMERIC;
+ALTER TABLE product_options ADD COLUMN IF NOT EXISTS batches JSONB DEFAULT '[]'::jsonb;
+ALTER TABLE product_options DROP COLUMN IF EXISTS buy_price;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS buy_cost NUMERIC;

@@ -1,3 +1,10 @@
+export interface ProductOptionBatch {
+  id: string;
+  quantity: number;
+  remaining: number;
+  buyPrice: number;
+}
+
 export interface ProductOption {
   id: string;
   name: string;
@@ -5,6 +12,7 @@ export interface ProductOption {
   size?: string;
   quantity: number;
   soldQuantity: number;
+  batches: ProductOptionBatch[];
 }
 
 export interface Product {
@@ -46,6 +54,7 @@ export interface Order {
   quantity: number;
   sellPrice: number;
   totalAmount: number;
+  buyCost?: number;
   platform: string;
   customerName?: string;
   notes?: string;

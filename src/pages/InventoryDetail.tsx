@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -21,7 +21,7 @@ import { Toaster, toast } from 'sonner';
 import { useProducts } from '@/hooks/useProducts';
 import { StatusBadge } from '@/components/StatusBadge';
 import { formatCurrency } from '@/lib/currency';
-import type { Product, ProductOption } from '@/types';
+import type { Product, ProductOption, ProductOptionBatch } from '@/types';
 const formatDate = (iso: string) =>
   new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
@@ -50,12 +50,20 @@ const InventoryDetail: React.FC = () => {
   /* -- Delete dialog -- */
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
 
+  /* -- Save guard -- */
+  const [isSaving, setIsSaving] = useState(false);
+  const isSavingRef = useRef(false);
+
   /* -- More menu -- */
   const [showMoreMenu, setShowMoreMenu] = useState(false);
 
   /* -- Add variant inline form -- */
   const [showAddVariant, setShowAddVariant] = useState(false);
-  const [newVariant, setNewVariant] = useState({ color: '', size: '', quantity: 1 });
+  const [newVariant, setNewVariant] = useState<{ color: string; size: string; batches: ProductOptionBatch[] }>({
+    color: '',
+    size: '',
+    batches: [{ id: 'batch-new', quantity: 1, remaining: 1, buyPrice: 0 }],
+  });
 
   /* -- Enter edit mode -- */
   const enterEditMode = () => {
@@ -73,9 +81,12 @@ const InventoryDetail: React.FC = () => {
 
   /* -- Save edits -- */
   const saveEdits = async () => {
-    if (!product || !id) return;
+    if (!product || !id || isSavingRef.current) return;
+    isSavingRef.current = true;
+    setIsSaving(true);
 
-    const buyPriceNum = parseFloat(editBuyPrice) || product.buyPrice;
+    try {
+      const buyPriceNum = parseFloat(editBuyPrice) || product.buyPrice;
     const originalPriceNum = editOriginalPrice ? parseFloat(editOriginalPrice) : undefined;
     const targetPriceNum = parseFloat(editTargetPrice) || product.targetPrice;
     const soldPriceNum = editSoldPrice ? parseFloat(editSoldPrice) : undefined;
@@ -83,21 +94,25 @@ const InventoryDetail: React.FC = () => {
     const totalQty = editOptions.reduce((sum, o) => sum + o.quantity, 0);
     const totalSold = editOptions.reduce((sum, o) => sum + o.soldQuantity, 0);
 
-    await updateProduct(id, {
-      name: editName.trim() || product.name,
-      buyPrice: buyPriceNum,
-      originalPrice: originalPriceNum,
-      targetPrice: targetPriceNum,
-      soldPrice: soldPriceNum,
-      status: editStatus,
-      notes: editNotes.trim() || undefined,
-      options: editOptions,
-      totalQuantity: totalQty,
-      totalSold: totalSold,
-    });
-
-    toast.success('Item updated successfully');
-    setEditMode(false);
+      await updateProduct(id, {
+        name: editName.trim() || product.name,
+        buyPrice: buyPriceNum,
+        originalPrice: originalPriceNum,
+        targetPrice: targetPriceNum,
+        soldPrice: soldPriceNum,
+        status: editStatus,
+        notes: editNotes.trim() || undefined,
+        options: editOptions,
+        totalQuantity: totalQty,
+        totalSold: totalSold,
+      });
+      
+      toast.success('Item updated successfully');
+      setEditMode(false);
+    } finally {
+      setIsSaving(false);
+      isSavingRef.current = false;
+    }
   };
 
   /* -- Cancel edits -- */
@@ -113,32 +128,113 @@ const InventoryDetail: React.FC = () => {
     navigate('/inventory');
   };
 
-  /* -- Update option quantity inline -- */
-  const updateOptionQty = (optionId: string, newQty: number) => {
-    if (!editMode) return;
-    setEditOptions((prev) =>
-      prev.map((o) => (o.id === optionId ? { ...o, quantity: Math.max(0, newQty) } : o))
-    );
+  /* -- Recalculate option quantity/soldQuantity from batches -- */
+  const recalcOptionFromBatches = (option: ProductOption): ProductOption => {
+    const quantity = option.batches.reduce((sum, b) => sum + b.quantity, 0);
+    const remaining = option.batches.reduce((sum, b) => sum + b.remaining, 0);
+    return { ...option, quantity, soldQuantity: quantity - remaining };
   };
 
   /* -- Update option sold inline -- */
   const updateOptionSold = (optionId: string, newSold: number) => {
     if (!editMode) return;
     setEditOptions((prev) =>
-      prev.map((o) => (o.id === optionId ? { ...o, soldQuantity: Math.max(0, Math.min(newSold, o.quantity)) } : o))
+      prev.map((o) => {
+        if (o.id !== optionId) return o;
+        const clamped = Math.max(0, Math.min(newSold, o.quantity));
+        // Adjust remaining across batches (consume from the end / restore to the end)
+        const diff = clamped - o.soldQuantity;
+        let remainingToAdjust = Math.abs(diff);
+        const batches = o.batches.map((b) => ({ ...b }));
+        if (diff > 0) {
+          // sell more: consume remaining FIFO
+          for (const batch of batches) {
+            if (remainingToAdjust <= 0) break;
+            const take = Math.min(batch.remaining, remainingToAdjust);
+            batch.remaining -= take;
+            remainingToAdjust -= take;
+          }
+        } else {
+          // undo sales: restore to batches from last to first
+          for (let i = batches.length - 1; i >= 0; i--) {
+            if (remainingToAdjust <= 0) break;
+            const batch = batches[i];
+            const restore = Math.min(batch.quantity - batch.remaining, remainingToAdjust);
+            batch.remaining += restore;
+            remainingToAdjust -= restore;
+          }
+        }
+        return recalcOptionFromBatches({ ...o, batches });
+      })
+    );
+  };
+
+  /* -- Batch editing -- */
+  const addBatch = (optionId: string) => {
+    if (!editMode) return;
+    setEditOptions((prev) =>
+      prev.map((o) =>
+        o.id === optionId
+          ? recalcOptionFromBatches({
+              ...o,
+              batches: [
+                ...o.batches,
+                { id: `batch-${Date.now()}`, quantity: 1, remaining: 1, buyPrice: product?.buyPrice ?? 0 },
+              ],
+            })
+          : o
+      )
+    );
+  };
+
+  const removeBatch = (optionId: string, batchId: string) => {
+    if (!editMode) return;
+    setEditOptions((prev) =>
+      prev.map((o) =>
+        o.id === optionId
+          ? recalcOptionFromBatches({ ...o, batches: o.batches.filter((b) => b.id !== batchId) })
+          : o
+      )
+    );
+  };
+
+  const updateBatch = (optionId: string, batchId: string, field: keyof ProductOptionBatch, value: string | number) => {
+    if (!editMode) return;
+    setEditOptions((prev) =>
+      prev.map((o) => {
+        if (o.id !== optionId) return o;
+        const batches = o.batches.map((b) => {
+          if (b.id !== batchId) return b;
+          if (field === 'quantity') {
+            const qty = Math.max(0, parseInt(String(value)) || 0);
+            return { ...b, quantity: qty, remaining: Math.min(b.remaining, qty) };
+          }
+          if (field === 'buyPrice') {
+            return { ...b, buyPrice: parseFloat(String(value)) || 0 };
+          }
+          return { ...b, [field]: value };
+        });
+        return recalcOptionFromBatches({ ...o, batches });
+      })
     );
   };
 
   /* -- Add variant -- */
   const handleAddVariant = async () => {
     if (!product || !id) return;
+    const batches = newVariant.batches.map((b) => ({
+      ...b,
+      buyPrice: b.buyPrice || product.buyPrice,
+    }));
+    const quantity = batches.reduce((sum, b) => sum + b.quantity, 0);
     const variant: ProductOption = {
       id: `opt-${Date.now()}`,
       name: `${newVariant.color || ''} ${newVariant.size || ''}`.trim() || 'Default',
       color: newVariant.color || undefined,
       size: newVariant.size || undefined,
-      quantity: newVariant.quantity,
+      quantity,
       soldQuantity: 0,
+      batches,
     };
     const newOptions = [...product.options, variant];
     const totalQty = newOptions.reduce((sum, o) => sum + o.quantity, 0);
@@ -148,10 +244,49 @@ const InventoryDetail: React.FC = () => {
     });
     toast.success('Variant added');
     setShowAddVariant(false);
-    setNewVariant({ color: '', size: '', quantity: 1 });
+    setNewVariant({
+      color: '',
+      size: '',
+      batches: [{ id: `batch-${Date.now()}`, quantity: 1, remaining: 1, buyPrice: product.buyPrice }],
+    });
   };
 
   /* -- Delete variant: handled inline via updateProduct -- */
+
+  /* -- New variant batch helpers -- */
+  const addNewBatch = () => {
+    setNewVariant((p) => ({
+      ...p,
+      batches: [
+        ...p.batches,
+        { id: `batch-${Date.now()}`, quantity: 1, remaining: 1, buyPrice: product?.buyPrice ?? 0 },
+      ],
+    }));
+  };
+
+  const removeNewBatch = (batchId: string) => {
+    setNewVariant((p) => ({
+      ...p,
+      batches: p.batches.filter((b) => b.id !== batchId),
+    }));
+  };
+
+  const updateNewBatch = (batchId: string, field: keyof ProductOptionBatch, value: string | number) => {
+    setNewVariant((p) => ({
+      ...p,
+      batches: p.batches.map((b) => {
+        if (b.id !== batchId) return b;
+        if (field === 'quantity') {
+          const qty = Math.max(0, parseInt(String(value)) || 0);
+          return { ...b, quantity: qty, remaining: qty };
+        }
+        if (field === 'buyPrice') {
+          return { ...b, buyPrice: parseFloat(String(value)) || 0 };
+        }
+        return { ...b, [field]: value };
+      }),
+    }));
+  };
 
   /* -- Duplicate item -- */
   const duplicateItem = () => {
@@ -164,15 +299,26 @@ const InventoryDetail: React.FC = () => {
   /* -- Computed values for display -- */
   const displayOptions = editMode ? editOptions : (product?.options || []);
 
-  const profitPerUnit = product ? (product.soldPrice || product.targetPrice) - product.buyPrice : 0;
-  const marginPercent = product && product.buyPrice > 0 ? (profitPerUnit / product.buyPrice) * 100 : 0;
+  const effectiveTargetPrice = editMode ? (parseFloat(editTargetPrice) || product?.targetPrice || 0) : (product?.targetPrice || 0);
+  const effectiveSoldPrice = editMode
+    ? (editSoldPrice ? parseFloat(editSoldPrice) : (product?.soldPrice || effectiveTargetPrice))
+    : (product?.soldPrice || effectiveTargetPrice);
+
+  const totalQuantity = displayOptions.reduce((sum, o) => sum + o.quantity, 0);
+  const totalSold = displayOptions.reduce((sum, o) => sum + o.soldQuantity, 0);
+  const totalCost = displayOptions.reduce(
+    (sum, o) => sum + o.batches.reduce((bSum, b) => bSum + b.quantity * b.buyPrice, 0),
+    0
+  );
+  const avgCost = totalQuantity > 0 ? totalCost / totalQuantity : 0;
+  const profitPerUnit = effectiveSoldPrice - avgCost;
+  const marginPercent = avgCost > 0 ? (profitPerUnit / avgCost) * 100 : 0;
   const discountPercent = product && product.originalPrice && product.originalPrice > 0
-    ? ((product.originalPrice - product.targetPrice) / product.originalPrice) * 100
+    ? ((product.originalPrice - effectiveTargetPrice) / product.originalPrice) * 100
     : 0;
-  const totalCost = product ? product.buyPrice * product.totalQuantity : 0;
-  const totalRevenue = product ? (product.soldPrice || product.targetPrice) * product.totalSold : 0;
-  const potentialRevenue = product ? product.targetPrice * (product.totalQuantity - product.totalSold) : 0;
-  const totalPotentialProfit = product ? profitPerUnit * product.totalQuantity : 0;
+  const totalRevenue = effectiveSoldPrice * totalSold;
+  const potentialRevenue = effectiveTargetPrice * (totalQuantity - totalSold);
+  const totalPotentialProfit = profitPerUnit * totalQuantity;
 
   /* -- Price history timeline data -- */
   const timelineItems = useMemo(() => {
@@ -314,6 +460,7 @@ const InventoryDetail: React.FC = () => {
               </button>
               <button
                 onClick={saveEdits}
+                disabled={isSaving}
                 className="inline-flex items-center gap-2 h-9 px-4 rounded-lg text-sm font-medium transition-all duration-150"
                 style={{ backgroundColor: '#6366F1', color: '#0B0D12' }}
                 onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#818CF8'; e.currentTarget.style.transform = 'translateY(-1px)'; }}
@@ -522,10 +669,9 @@ const InventoryDetail: React.FC = () => {
             <div className="flex items-center px-4" style={{ height: '36px', backgroundColor: '#090A10' }}>
               <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#5C6078', flex: '0 0 100px' }}>Color</span>
               <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#5C6078', flex: '0 0 80px' }}>Size</span>
-              <span className="text-xs font-medium uppercase tracking-wider text-right" style={{ color: '#5C6078', flex: '0 0 80px' }}>Qty</span>
-              <span className="text-xs font-medium uppercase tracking-wider text-right" style={{ color: '#5C6078', flex: '0 0 100px' }}>Buy KM</span>
+              <span className="text-xs font-medium uppercase tracking-wider" style={{ color: '#5C6078', flex: '1' }}>Batches</span>
               <span className="text-xs font-medium uppercase tracking-wider text-right" style={{ color: '#5C6078', flex: '0 0 100px' }}>Target KM</span>
-              <span className="text-xs font-medium uppercase tracking-wider text-center" style={{ color: '#5C6078', flex: '0 0 80px' }}>Sold</span>
+              <span className="text-xs font-medium uppercase tracking-wider text-center" style={{ color: '#5C6078', flex: '0 0 70px' }}>Sold</span>
               <span className="text-xs font-medium uppercase tracking-wider text-center" style={{ color: '#5C6078', flex: '0 0 80px' }}>Remaining</span>
               {editMode && (
                 <span className="text-xs font-medium uppercase tracking-wider text-center" style={{ color: '#5C6078', flex: '0 0 60px' }}>Actions</span>
@@ -545,9 +691,8 @@ const InventoryDetail: React.FC = () => {
                     delay: idx * 0.025,
                     ease: [0.0, 0.0, 0.2, 1] as [number, number, number, number],
                   }}
-                  className="flex items-center px-4 transition-colors duration-100"
+                  className="flex items-start px-4 py-2 transition-colors duration-100"
                   style={{
-                    height: '44px',
                     borderBottom: idx < displayOptions.length - 1 ? '1px solid #1E2130' : undefined,
                   }}
                   onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#1A1D26'; }}
@@ -574,46 +719,90 @@ const InventoryDetail: React.FC = () => {
                   </div>
 
                   {/* Size */}
-                  <span className="text-sm" style={{ color: '#E8EAF0', flex: '0 0 80px' }}>
+                  <span className="text-sm pt-1" style={{ color: '#E8EAF0', flex: '0 0 80px' }}>
                     {option.size || '—'}
                   </span>
 
-                  {/* Quantity */}
-                  <div style={{ flex: '0 0 80px' }} className="text-right">
-                    {editMode ? (
-                      <input
-                        type="number"
-                        min="0"
-                        value={option.quantity}
-                        onChange={(e) => updateOptionQty(option.id, parseInt(e.target.value) || 0)}
-                        className="rounded-md border text-sm outline-none px-2 text-right font-mono"
-                        style={{
-                          backgroundColor: '#0D0F14',
-                          borderColor: '#1E2130',
-                          color: '#E8EAF0',
-                          height: '30px',
-                          width: '60px',
-                        }}
-                        onFocus={(e) => { e.currentTarget.style.borderColor = '#6366F1'; e.currentTarget.style.boxShadow = '0 0 0 3px rgba(99,102,241,0.15)'; }}
-                        onBlur={(e) => { e.currentTarget.style.borderColor = '#1E2130'; e.currentTarget.style.boxShadow = 'none'; }}
-                      />
-                    ) : (
-                      <span className="text-sm font-mono" style={{ color: '#E8EAF0' }}>{option.quantity}</span>
+                  {/* Batches */}
+                  <div style={{ flex: '1' }}>
+                    {option.batches.map((batch) => (
+                      <div key={batch.id} className="flex items-center gap-2 mb-1">
+                        {editMode ? (
+                          <>
+                            <input
+                              type="number"
+                              min="0"
+                              step="1"
+                              value={batch.quantity}
+                              onChange={(e) => updateBatch(option.id, batch.id, 'quantity', e.target.value)}
+                              className="rounded-md border text-sm outline-none px-2 text-right font-mono"
+                              style={{
+                                backgroundColor: '#0D0F14',
+                                borderColor: '#1E2130',
+                                color: '#E8EAF0',
+                                height: '28px',
+                                width: '60px',
+                              }}
+                              onFocus={(e) => { e.currentTarget.style.borderColor = '#6366F1'; }}
+                              onBlur={(e) => { e.currentTarget.style.borderColor = '#1E2130'; }}
+                            />
+                            <span className="text-xs" style={{ color: '#5C6078' }}>@</span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={batch.buyPrice}
+                              onChange={(e) => updateBatch(option.id, batch.id, 'buyPrice', e.target.value)}
+                              className="rounded-md border text-sm outline-none px-2 text-right font-mono"
+                              style={{
+                                backgroundColor: '#0D0F14',
+                                borderColor: '#1E2130',
+                                color: '#E8EAF0',
+                                height: '28px',
+                                width: '80px',
+                              }}
+                              onFocus={(e) => { e.currentTarget.style.borderColor = '#6366F1'; }}
+                              onBlur={(e) => { e.currentTarget.style.borderColor = '#1E2130'; }}
+                            />
+                            <button
+                              onClick={() => removeBatch(option.id, batch.id)}
+                              className="flex items-center justify-center rounded-md transition-colors duration-100"
+                              style={{ width: '24px', height: '24px', color: '#5C6078' }}
+                              onMouseEnter={(e) => { e.currentTarget.style.color = '#FB7185'; e.currentTarget.style.backgroundColor = 'rgba(251,113,133,0.12)'; }}
+                              onMouseLeave={(e) => { e.currentTarget.style.color = '#5C6078'; e.currentTarget.style.backgroundColor = 'transparent'; }}
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </>
+                        ) : (
+                          <span className="text-sm font-mono" style={{ color: '#8B8FA3' }}>
+                            {batch.quantity} @ {formatCurrency(batch.buyPrice)}
+                            <span className="text-xs ml-1" style={{ color: '#5C6078' }}>({batch.remaining} left)</span>
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                    {editMode && (
+                      <button
+                        onClick={() => addBatch(option.id)}
+                        className="inline-flex items-center gap-1 text-xs font-medium transition-colors duration-150 mt-1"
+                        style={{ color: '#6366F1' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = '#818CF8'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = '#6366F1'; }}
+                      >
+                        <Plus size={12} />
+                        Add batch
+                      </button>
                     )}
                   </div>
 
-                  {/* Buy Price */}
-                  <span className="text-sm font-mono text-right" style={{ color: '#8B8FA3', flex: '0 0 100px' }}>
-                    {formatCurrency(editMode ? (parseFloat(editBuyPrice) || 0) : product.buyPrice)}/unit
-                  </span>
-
                   {/* Target Price */}
-                  <span className="text-sm font-mono text-right" style={{ color: '#E8EAF0', flex: '0 0 100px' }}>
+                  <span className="text-sm font-mono text-right pt-1" style={{ color: '#E8EAF0', flex: '0 0 100px' }}>
                     {formatCurrency(editMode ? (parseFloat(editTargetPrice) || 0) : product.targetPrice)}/unit
                   </span>
 
                   {/* Sold */}
-                  <div style={{ flex: '0 0 80px' }} className="text-center">
+                  <div style={{ flex: '0 0 70px' }} className="text-center pt-1">
                     {editMode ? (
                       <input
                         type="number"
@@ -626,7 +815,7 @@ const InventoryDetail: React.FC = () => {
                           backgroundColor: '#0D0F14',
                           borderColor: '#1E2130',
                           color: '#E8EAF0',
-                          height: '30px',
+                          height: '28px',
                           width: '50px',
                         }}
                         onFocus={(e) => { e.currentTarget.style.borderColor = '#6366F1'; e.currentTarget.style.boxShadow = '0 0 0 3px rgba(99,102,241,0.15)'; }}
@@ -638,7 +827,7 @@ const InventoryDetail: React.FC = () => {
                   </div>
 
                   {/* Remaining */}
-                  <span className="text-sm font-mono text-center" style={{
+                  <span className="text-sm font-mono text-center pt-1" style={{
                     color: remaining === 0 ? '#34D399' : '#FBBF24',
                     flex: '0 0 80px',
                   }}>
@@ -647,7 +836,7 @@ const InventoryDetail: React.FC = () => {
 
                   {/* Actions */}
                   {editMode && (
-                    <div style={{ flex: '0 0 60px' }} className="flex items-center justify-center">
+                    <div style={{ flex: '0 0 60px' }} className="flex items-start justify-center pt-1">
                       <button
                         onClick={() => setEditOptions((prev) => prev.filter((o) => o.id !== option.id))}
                         className="flex items-center justify-center rounded-md transition-colors duration-100"
@@ -671,49 +860,96 @@ const InventoryDetail: React.FC = () => {
                   animate={{ opacity: 1, height: 'auto' }}
                   exit={{ opacity: 0, height: 0 }}
                   transition={{ duration: 0.2 }}
-                  className="flex items-center gap-2 px-4 overflow-hidden"
+                  className="px-4 overflow-hidden"
                   style={{ borderTop: '1px solid #1E2130', backgroundColor: '#090A10' }}
                 >
-                  <div className="flex items-center gap-2 py-2">
-                    <input
-                      type="text"
-                      placeholder="Color"
-                      value={newVariant.color}
-                      onChange={(e) => setNewVariant((p) => ({ ...p, color: e.target.value }))}
-                      className="rounded-md border text-sm outline-none px-2"
-                      style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '32px', width: '100px' }}
-                    />
-                    <input
-                      type="text"
-                      placeholder="Size"
-                      value={newVariant.size}
-                      onChange={(e) => setNewVariant((p) => ({ ...p, size: e.target.value }))}
-                      className="rounded-md border text-sm outline-none px-2"
-                      style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '32px', width: '80px' }}
-                    />
-                    <input
-                      type="number"
-                      min="1"
-                      value={newVariant.quantity}
-                      onChange={(e) => setNewVariant((p) => ({ ...p, quantity: parseInt(e.target.value) || 0 }))}
-                      className="rounded-md border text-sm outline-none px-2 text-right font-mono"
-                      style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '32px', width: '60px' }}
-                    />
-                    <button
-                      onClick={handleAddVariant}
-                      className="inline-flex items-center gap-1 h-8 px-3 rounded-md text-xs font-medium transition-all duration-150"
-                      style={{ backgroundColor: '#6366F1', color: '#0B0D12' }}
-                    >
-                      <Check size={12} />
-                      Save
-                    </button>
-                    <button
-                      onClick={() => { setShowAddVariant(false); setNewVariant({ color: '', size: '', quantity: 1 }); }}
-                      className="h-8 px-3 rounded-md text-xs font-medium transition-all duration-150"
-                      style={{ backgroundColor: '#11131A', color: '#8B8FA3', border: '1px solid #1E2130' }}
-                    >
-                      Cancel
-                    </button>
+                  <div className="flex items-start gap-2 py-2">
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          placeholder="Color"
+                          value={newVariant.color}
+                          onChange={(e) => setNewVariant((p) => ({ ...p, color: e.target.value }))}
+                          className="rounded-md border text-sm outline-none px-2"
+                          style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '32px', width: '100px' }}
+                        />
+                        <input
+                          type="text"
+                          placeholder="Size"
+                          value={newVariant.size}
+                          onChange={(e) => setNewVariant((p) => ({ ...p, size: e.target.value }))}
+                          className="rounded-md border text-sm outline-none px-2"
+                          style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '32px', width: '80px' }}
+                        />
+                      </div>
+                      {newVariant.batches.map((batch) => (
+                        <div key={batch.id} className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={batch.quantity}
+                            onChange={(e) => updateNewBatch(batch.id, 'quantity', e.target.value)}
+                            className="rounded-md border text-sm outline-none px-2 text-right font-mono"
+                            style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '30px', width: '60px' }}
+                          />
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            placeholder="Buy KM"
+                            value={batch.buyPrice}
+                            onChange={(e) => updateNewBatch(batch.id, 'buyPrice', e.target.value)}
+                            className="rounded-md border text-sm outline-none px-2 text-right font-mono"
+                            style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '30px', width: '90px' }}
+                          />
+                          <button
+                            onClick={() => removeNewBatch(batch.id)}
+                            className="flex items-center justify-center rounded-md transition-colors duration-100"
+                            style={{ width: '26px', height: '26px', color: '#5C6078' }}
+                            onMouseEnter={(e) => { e.currentTarget.style.color = '#FB7185'; e.currentTarget.style.backgroundColor = 'rgba(251,113,133,0.12)'; }}
+                            onMouseLeave={(e) => { e.currentTarget.style.color = '#5C6078'; e.currentTarget.style.backgroundColor = 'transparent'; }}
+                          >
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        onClick={addNewBatch}
+                        className="inline-flex items-center gap-1 text-xs font-medium transition-colors duration-150"
+                        style={{ color: '#6366F1' }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = '#818CF8'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = '#6366F1'; }}
+                      >
+                        <Plus size={12} />
+                        Add batch
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-2 ml-2">
+                      <button
+                        onClick={handleAddVariant}
+                        className="inline-flex items-center gap-1 h-8 px-3 rounded-md text-xs font-medium transition-all duration-150"
+                        style={{ backgroundColor: '#6366F1', color: '#0B0D12' }}
+                      >
+                        <Check size={12} />
+                        Save
+                      </button>
+                      <button
+                        onClick={() => {
+                          setShowAddVariant(false);
+                          setNewVariant({
+                            color: '',
+                            size: '',
+                            batches: [{ id: `batch-${Date.now()}`, quantity: 1, remaining: 1, buyPrice: product?.buyPrice ?? 0 }],
+                          });
+                        }}
+                        className="h-8 px-3 rounded-md text-xs font-medium transition-all duration-150"
+                        style={{ backgroundColor: '#11131A', color: '#8B8FA3', border: '1px solid #1E2130' }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                 </motion.div>
               )}
@@ -736,47 +972,92 @@ const InventoryDetail: React.FC = () => {
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
                 animate={{ opacity: 1, height: 'auto' }}
-                className="flex items-center gap-2"
+                className="flex flex-col gap-2"
               >
-                <input
-                  type="text"
-                  placeholder="Color"
-                  value={newVariant.color}
-                  onChange={(e) => setNewVariant((p) => ({ ...p, color: e.target.value }))}
-                  className="rounded-md border text-sm outline-none px-2"
-                  style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '32px', width: '100px' }}
-                />
-                <input
-                  type="text"
-                  placeholder="Size"
-                  value={newVariant.size}
-                  onChange={(e) => setNewVariant((p) => ({ ...p, size: e.target.value }))}
-                  className="rounded-md border text-sm outline-none px-2"
-                  style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '32px', width: '80px' }}
-                />
-                <input
-                  type="number"
-                  min="1"
-                  value={newVariant.quantity}
-                  onChange={(e) => setNewVariant((p) => ({ ...p, quantity: parseInt(e.target.value) || 0 }))}
-                  className="rounded-md border text-sm outline-none px-2 text-right font-mono"
-                  style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '32px', width: '60px' }}
-                />
-                <button
-                  onClick={handleAddVariant}
-                  className="inline-flex items-center gap-1 h-8 px-3 rounded-md text-xs font-medium"
-                  style={{ backgroundColor: '#6366F1', color: '#0B0D12' }}
-                >
-                  <Check size={12} />
-                  Save
-                </button>
-                <button
-                  onClick={() => { setShowAddVariant(false); }}
-                  className="h-8 px-3 rounded-md text-xs font-medium"
-                  style={{ backgroundColor: '#11131A', color: '#8B8FA3', border: '1px solid #1E2130' }}
-                >
-                  Cancel
-                </button>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="Color"
+                    value={newVariant.color}
+                    onChange={(e) => setNewVariant((p) => ({ ...p, color: e.target.value }))}
+                    className="rounded-md border text-sm outline-none px-2"
+                    style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '32px', width: '100px' }}
+                  />
+                  <input
+                    type="text"
+                    placeholder="Size"
+                    value={newVariant.size}
+                    onChange={(e) => setNewVariant((p) => ({ ...p, size: e.target.value }))}
+                    className="rounded-md border text-sm outline-none px-2"
+                    style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '32px', width: '80px' }}
+                  />
+                </div>
+                {newVariant.batches.map((batch) => (
+                  <div key={batch.id} className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={batch.quantity}
+                      onChange={(e) => updateNewBatch(batch.id, 'quantity', e.target.value)}
+                      className="rounded-md border text-sm outline-none px-2 text-right font-mono"
+                      style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '30px', width: '60px' }}
+                    />
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="Buy KM"
+                      value={batch.buyPrice}
+                      onChange={(e) => updateNewBatch(batch.id, 'buyPrice', e.target.value)}
+                      className="rounded-md border text-sm outline-none px-2 text-right font-mono"
+                      style={{ backgroundColor: '#0D0F14', borderColor: '#1E2130', color: '#E8EAF0', height: '30px', width: '90px' }}
+                    />
+                    <button
+                      onClick={() => removeNewBatch(batch.id)}
+                      className="flex items-center justify-center rounded-md transition-colors duration-100"
+                      style={{ width: '26px', height: '26px', color: '#5C6078' }}
+                      onMouseEnter={(e) => { e.currentTarget.style.color = '#FB7185'; e.currentTarget.style.backgroundColor = 'rgba(251,113,133,0.12)'; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.color = '#5C6078'; e.currentTarget.style.backgroundColor = 'transparent'; }}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                ))}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={addNewBatch}
+                    className="inline-flex items-center gap-1 text-xs font-medium transition-colors duration-150"
+                    style={{ color: '#6366F1' }}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = '#818CF8'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = '#6366F1'; }}
+                  >
+                    <Plus size={12} />
+                    Add batch
+                  </button>
+                  <button
+                    onClick={handleAddVariant}
+                    className="inline-flex items-center gap-1 h-8 px-3 rounded-md text-xs font-medium"
+                    style={{ backgroundColor: '#6366F1', color: '#0B0D12' }}
+                  >
+                    <Check size={12} />
+                    Save
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowAddVariant(false);
+                      setNewVariant({
+                        color: '',
+                        size: '',
+                        batches: [{ id: `batch-${Date.now()}`, quantity: 1, remaining: 1, buyPrice: product?.buyPrice ?? 0 }],
+                      });
+                    }}
+                    className="h-8 px-3 rounded-md text-xs font-medium"
+                    style={{ backgroundColor: '#11131A', color: '#8B8FA3', border: '1px solid #1E2130' }}
+                  >
+                    Cancel
+                  </button>
+                </div>
               </motion.div>
             )}
           </div>

@@ -14,6 +14,7 @@ interface DbOrder {
   quantity: number;
   sell_price: number;
   total_amount: number;
+  buy_cost: number | null;
   platform: string;
   customer_name: string | null;
   notes: string | null;
@@ -33,6 +34,7 @@ function mapOrder(db: DbOrder): Order {
     quantity: db.quantity,
     sellPrice: db.sell_price,
     totalAmount: db.total_amount,
+    buyCost: db.buy_cost ?? undefined,
     platform: db.platform,
     customerName: db.customer_name ?? undefined,
     notes: db.notes ?? undefined,
@@ -89,6 +91,7 @@ export function useOrders() {
         quantity: orderData.quantity,
         sell_price: orderData.sellPrice,
         total_amount: totalAmount,
+        buy_cost: orderData.buyCost ?? null,
         platform: orderData.platform,
         customer_name: orderData.customerName ?? null,
         notes: orderData.notes ?? null,

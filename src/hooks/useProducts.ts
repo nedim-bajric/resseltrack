@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import type { Product, ProductOption } from '@/types';
+import type { Product, ProductOption, ProductOptionBatch } from '@/types';
 import { supabase } from '@/lib/supabase';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -12,6 +12,7 @@ interface DbProductOption {
   size: string | null;
   quantity: number;
   sold_quantity: number;
+  batches: unknown[] | null;
 }
 
 interface DbProduct {
@@ -33,8 +34,64 @@ interface DbProduct {
   product_options: DbProductOption[];
 }
 
+/* ── Helpers ──────────────────────────────────────────────────────── */
+function normalizeBatches(
+  raw: unknown,
+  quantity: number,
+  soldQuantity: number,
+  productBuyPrice: number
+): ProductOptionBatch[] {
+  const parsed: ProductOptionBatch[] = [];
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      const record = item as Record<string, unknown>;
+      const batchQty = Number(record.quantity ?? 0);
+      if (batchQty <= 0) continue;
+      parsed.push({
+        id: String(record.id ?? `batch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`),
+        quantity: batchQty,
+        remaining: Math.max(0, Math.min(batchQty, Number(record.remaining ?? batchQty))),
+        buyPrice: Number(record.buyPrice ?? productBuyPrice),
+      });
+    }
+  }
+  if (parsed.length > 0) return parsed;
+  return [
+    {
+      id: `batch-${Date.now()}`,
+      quantity,
+      remaining: Math.max(0, quantity - soldQuantity),
+      buyPrice: productBuyPrice,
+    },
+  ];
+}
+
+export function getOptionAverageBuyPrice(option: ProductOption): number {
+  const totalRemaining = option.batches.reduce((sum, b) => sum + b.remaining, 0);
+  if (totalRemaining <= 0) return option.batches[0]?.buyPrice ?? 0;
+  const weighted = option.batches.reduce((sum, b) => sum + b.remaining * b.buyPrice, 0);
+  return weighted / totalRemaining;
+}
+
+export function consumeBatchesFIFO(
+  batches: ProductOptionBatch[],
+  quantity: number
+): { cost: number; updatedBatches: ProductOptionBatch[] } {
+  let remainingToConsume = quantity;
+  let cost = 0;
+  const updated = batches.map((b) => ({ ...b }));
+  for (const batch of updated) {
+    if (remainingToConsume <= 0) break;
+    const take = Math.min(batch.remaining, remainingToConsume);
+    batch.remaining -= take;
+    cost += take * batch.buyPrice;
+    remainingToConsume -= take;
+  }
+  return { cost, updatedBatches: updated };
+}
+
 /* ── Mappers ──────────────────────────────────────────────────────── */
-function mapOption(db: DbProductOption): ProductOption {
+function mapOption(db: DbProductOption, productBuyPrice: number): ProductOption {
   return {
     id: db.id,
     name: db.name,
@@ -42,6 +99,7 @@ function mapOption(db: DbProductOption): ProductOption {
     size: db.size ?? undefined,
     quantity: db.quantity,
     soldQuantity: db.sold_quantity,
+    batches: normalizeBatches(db.batches, db.quantity, db.sold_quantity, productBuyPrice),
   };
 }
 
@@ -58,7 +116,7 @@ function mapProduct(db: DbProduct): Product {
     status: db.status,
     totalQuantity: db.total_quantity,
     totalSold: db.total_sold,
-    options: (db.product_options || []).map(mapOption),
+    options: (db.product_options || []).map((o) => mapOption(o, db.buy_price)),
     source: db.source,
     notes: db.notes ?? undefined,
     createdAt: db.created_at,
@@ -140,6 +198,7 @@ export function useProducts() {
           size: o.size ?? null,
           quantity: o.quantity,
           sold_quantity: o.soldQuantity,
+          batches: o.batches,
         }));
         const { error: optsError } = await supabase.from('product_options').insert(opts);
         if (optsError) {
@@ -169,18 +228,87 @@ export function useProducts() {
       if (updates.source !== undefined) dbUpdates.source = updates.source;
       if (updates.notes !== undefined) dbUpdates.notes = updates.notes ?? null;
       if (updates.options !== undefined) {
-        // Delete old options and re-insert
-        await supabase.from('product_options').delete().eq('product_id', id);
-        if (updates.options.length > 0) {
-          const opts = updates.options.map((o) => ({
+        // Fetch existing option IDs so we can update in-place instead of delete+reinsert.
+        const { data: existingOptions, error: fetchError } = await supabase
+          .from('product_options')
+          .select('id')
+          .eq('product_id', id);
+
+        if (fetchError) {
+          console.error('Failed to fetch existing options:', fetchError);
+        }
+
+        const existingIds = new Set((existingOptions || []).map((o) => o.id));
+
+        // Update existing options (preserve their DB IDs / FK relationships).
+        const optionsToUpdate = updates.options.filter((o) => existingIds.has(o.id));
+        for (const o of optionsToUpdate) {
+          const { error: optionUpdateError } = await supabase
+            .from('product_options')
+            .update({
+              name: o.name,
+              color: o.color ?? null,
+              size: o.size ?? null,
+              quantity: o.quantity,
+              sold_quantity: o.soldQuantity,
+              batches: o.batches,
+            })
+            .eq('id', o.id);
+
+          if (optionUpdateError) {
+            console.error('Failed to update option:', optionUpdateError);
+          }
+        }
+
+        // Insert brand-new options (their IDs are temp strings like opt-...).
+        const optionsToInsert = updates.options.filter((o) => !existingIds.has(o.id));
+        if (optionsToInsert.length > 0) {
+          const opts = optionsToInsert.map((o) => ({
             product_id: id,
             name: o.name,
             color: o.color ?? null,
             size: o.size ?? null,
             quantity: o.quantity,
             sold_quantity: o.soldQuantity,
+            batches: o.batches,
           }));
-          await supabase.from('product_options').insert(opts);
+          const { error: insertError } = await supabase.from('product_options').insert(opts);
+          if (insertError) {
+            console.error('Failed to insert options:', insertError);
+          }
+        }
+
+        // Delete options that were removed, but only if they have no linked orders.
+        const incomingIds = new Set(updates.options.map((o) => o.id).filter(Boolean));
+        const idsToDelete = [...existingIds].filter((existingId) => !incomingIds.has(existingId));
+
+        if (idsToDelete.length > 0) {
+          const { data: linkedOrders, error: ordersError } = await supabase
+            .from('orders')
+            .select('option_id')
+            .in('option_id', idsToDelete);
+
+          if (ordersError) {
+            console.error('Failed to check linked orders:', ordersError);
+          }
+
+          const linkedOptionIds = new Set((linkedOrders || []).map((o) => o.option_id));
+          const deletableIds = idsToDelete.filter((optionId) => !linkedOptionIds.has(optionId));
+
+          if (deletableIds.length > 0) {
+            const { error: deleteError } = await supabase
+              .from('product_options')
+              .delete()
+              .in('id', deletableIds);
+
+            if (deleteError) {
+              console.error('Failed to delete options:', deleteError);
+            }
+          }
+
+          if (linkedOptionIds.size > 0) {
+            console.warn('Cannot delete options with linked orders:', [...linkedOptionIds]);
+          }
         }
       }
 
@@ -244,16 +372,20 @@ export function useProducts() {
         newStatus = 'listed';
       }
 
-      // Update option sold_quantity directly (avoid delete+reinsert in updateProduct)
+      // Update option batches using FIFO (avoid delete+reinsert in updateProduct)
       if (optionId) {
         const option = product.options.find((o) => o.id === optionId);
         if (option) {
+          const { updatedBatches } = consumeBatchesFIFO(option.batches, quantity);
           const { error: optError } = await supabase
             .from('product_options')
-            .update({ sold_quantity: option.soldQuantity + quantity })
+            .update({
+              sold_quantity: option.soldQuantity + quantity,
+              batches: updatedBatches,
+            })
             .eq('id', optionId);
           if (optError) {
-            console.error('Failed to update option quantity:', optError);
+            console.error('Failed to update option batches:', optError);
           }
         }
       }

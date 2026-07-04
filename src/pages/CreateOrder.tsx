@@ -9,7 +9,7 @@ import {
   Calculator,
 } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
-import { useProducts } from '@/hooks/useProducts';
+import { useProducts, consumeBatchesFIFO, getOptionAverageBuyPrice } from '@/hooks/useProducts';
 import { useOrders } from '@/hooks/useOrders';
 import { formatCurrency } from '@/lib/currency';
 import type { Order } from '@/types';
@@ -243,8 +243,12 @@ const CreateOrder: React.FC = () => {
     return selectedProduct.totalQuantity - selectedProduct.totalSold;
   }, [selectedProduct, selectedOption]);
 
-  /* Buy price per unit */
-  const buyPrice = selectedProduct?.buyPrice ?? 0;
+  /* Average cost per unit for display */
+  const averageBuyPrice = selectedOption
+    ? getOptionAverageBuyPrice(selectedOption)
+    : selectedProduct
+    ? selectedProduct.buyPrice
+    : 0;
 
   /* Form change handler */
   const updateField = useCallback(
@@ -382,6 +386,7 @@ const CreateOrder: React.FC = () => {
       optionName: selectedOption?.name || undefined,
       quantity,
       sellPrice,
+      buyCost: orderBuyCost,
       platform: form.platform,
       customerName: form.customerName || undefined,
       notes: form.notes || undefined,
@@ -408,7 +413,12 @@ const CreateOrder: React.FC = () => {
   const quantityNum = parseInt(form.quantity, 10) || 0;
   const sellPriceNum = parseFloat(form.sellPrice) || 0;
   const totalRevenue = quantityNum * sellPriceNum;
-  const totalCost = quantityNum * buyPrice;
+  const orderBuyCost = selectedOption
+    ? consumeBatchesFIFO(selectedOption.batches, quantityNum).cost
+    : selectedProduct
+    ? quantityNum * selectedProduct.buyPrice
+    : 0;
+  const totalCost = orderBuyCost;
   const profit = totalRevenue - totalCost;
   const profitMargin = totalRevenue > 0 ? (profit / totalRevenue) * 100 : 0;
 
@@ -514,7 +524,7 @@ const CreateOrder: React.FC = () => {
                           {selectedProduct.name}
                         </p>
                         <p className="text-xs" style={{ color: '#5C6078' }}>
-                          {selectedProduct.category} · Buy: {formatCurrency(selectedProduct.buyPrice)} · Available: {selectedProduct.totalQuantity - selectedProduct.totalSold}
+                          {selectedProduct.category} · Buy: {formatCurrency(averageBuyPrice)} · Available: {selectedProduct.totalQuantity - selectedProduct.totalSold}
                         </p>
                       </div>
                       {selectedProduct.options.length > 0 && (
@@ -645,7 +655,7 @@ const CreateOrder: React.FC = () => {
                             Buy price
                           </p>
                           <p className="text-sm font-mono" style={{ color: '#E8EAF0' }}>
-                            {formatCurrency(buyPrice)}
+                            {formatCurrency(averageBuyPrice)}
                           </p>
                         </div>
                       </div>

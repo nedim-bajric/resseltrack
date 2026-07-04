@@ -5,6 +5,9 @@ import type {
   CategoryBreakdown,
   CostBreakdownItem,
   RecentActivity,
+  Product,
+  ProductOption,
+  Order,
 } from '@/types';
 import { useProducts } from './useProducts';
 import { useCosts } from './useCosts';
@@ -18,6 +21,24 @@ const PLATFORM_COLORS: Record<string, string> = {
   TikTok: '#A855F7',
   Other: '#5C6078',
 };
+
+// ── Helpers ──────────────────────────────────────────────────────
+function getOptionAverageBuyPrice(option: ProductOption): number {
+  const totalRemaining = option.batches.reduce((sum, b) => sum + b.remaining, 0);
+  if (totalRemaining <= 0) return option.batches[0]?.buyPrice ?? 0;
+  const weighted = option.batches.reduce((sum, b) => sum + b.remaining * b.buyPrice, 0);
+  console.log("weighted: ", weighted, " totalRemaining: ", totalRemaining);
+  return weighted / totalRemaining;
+}
+
+function getOrderCOGS(order: Order, products: Product[]): number {
+  if (order.buyCost !== undefined) return order.buyCost;
+  const product = products.find((p) => p.id === order.productId);
+  if (!product) return 0;
+  const option = order.optionId ? product.options.find((o) => o.id === order.optionId) : undefined;
+  const unitCost = option ? getOptionAverageBuyPrice(option) : product.buyPrice;
+  return unitCost * order.quantity;
+}
 
 // ═══════════════════════════════════════════════════════════════════
 //  useDashboard
@@ -40,16 +61,21 @@ export function useDashboard() {
   } = useMemo(() => {
     const totalRevenue = doneOrders.reduce((sum, o) => sum + o.totalAmount, 0);
     const totalCost = costs.reduce((sum, c) => sum + c.amount, 0);
-
-    const totalProfit = doneOrders.reduce((sum, o) => {
-      const product = products.find((p) => p.id === o.productId);
-      const costPerUnit = product ? product.buyPrice : 0;
-      return sum + (o.sellPrice - costPerUnit) * o.quantity;
-    }, 0);
+    const totalCOGS = doneOrders.reduce((sum, o) => sum + getOrderCOGS(o, products), 0);
+    const totalProfit = totalRevenue - totalCOGS - totalCost;
 
     const inventoryValue = products.reduce((sum, p) => {
-      const remaining = p.totalQuantity - p.totalSold;
-      return sum + remaining * p.buyPrice;
+      if (p.options.length === 0) {
+        const remaining = p.totalQuantity - p.totalSold;
+        return sum + remaining * p.buyPrice;
+      }
+      return (
+        sum +
+        p.options.reduce(
+          (optSum, o) => optSum + o.batches.reduce((batchSum, b) => batchSum + b.remaining * b.buyPrice, 0),
+          0
+        )
+      );
     }, 0);
 
     const totalItems = products.length;
@@ -89,7 +115,8 @@ export function useDashboard() {
 
       const revenue = monthOrders.reduce((sum, o) => sum + o.totalAmount, 0);
       const cost = monthCosts.reduce((sum, c) => sum + c.amount, 0);
-      const profit = revenue - cost;
+      const cogs = monthOrders.reduce((sum, o) => sum + getOrderCOGS(o, products), 0);
+      const profit = revenue - cogs - cost;
 
       return {
         date: format(month, 'MMM yyyy'),
@@ -98,7 +125,7 @@ export function useDashboard() {
         cost: Math.max(0, cost),
       };
     });
-  }, [doneOrders, costs]);
+  }, [doneOrders, costs, products]);
 
   // ── Inventory category breakdown ────────────────────────────────
   const categoryBreakdown: CategoryBreakdown[] = useMemo(() => {
@@ -175,7 +202,10 @@ export function useDashboard() {
         type: 'product_added' as const,
         title: p.name,
         description: 'Added to inventory',
-        amount: -(p.buyPrice * p.totalQuantity),
+        amount: -p.options.reduce(
+          (sum, o) => sum + o.batches.reduce((batchSum, b) => batchSum + b.quantity * b.buyPrice, 0),
+          p.options.length === 0 ? p.buyPrice * p.totalQuantity : 0
+        ),
         date: p.createdAt,
       }));
 
@@ -183,7 +213,7 @@ export function useDashboard() {
     all.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
     return all.slice(0, 8);
-  }, [orders, costs, products]);
+  }, [doneOrders, costs, products]);
 
   // ── Platform breakdown for pie chart (done orders only) ─────────
   const platformBreakdown = useMemo(() => {

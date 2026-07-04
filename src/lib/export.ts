@@ -117,7 +117,10 @@ export function exportToCSV(products: Product[], costs: Cost[], orders: Order[])
     if (p.options && p.options.length > 0) {
       for (const opt of p.options) {
         const optRemaining = opt.quantity - opt.soldQuantity;
-        const variantLabel = [opt.color, opt.size].filter(Boolean).join(' / ');
+        const variantLabel = [opt.color, opt.size].filter(Boolean).join(' / ') || opt.name;
+        const batchSummary = opt.batches
+          .map((b) => `${b.quantity} @ ${formatKM(b.buyPrice)}`)
+          .join(', ');
         inventoryRows.push([
           '',
           '',
@@ -131,7 +134,7 @@ export function exportToCSV(products: Product[], costs: Cost[], orders: Order[])
           '',
           '',
           '',
-          `Option: ${variantLabel || opt.name}`,
+          `Option: ${variantLabel} — Batches: ${batchSummary}`,
           String(opt.quantity),
           String(opt.soldQuantity),
           String(optRemaining),
@@ -162,6 +165,7 @@ export function exportToCSV(products: Product[], costs: Cost[], orders: Order[])
     'Option',
     'Quantity',
     'Sell Price (KM)',
+    'Buy Cost (KM)',
     'Total (KM)',
     'Platform',
     'Customer',
@@ -176,6 +180,7 @@ export function exportToCSV(products: Product[], costs: Cost[], orders: Order[])
       o.optionName || '',
       String(o.quantity),
       formatKM(o.sellPrice),
+      o.buyCost !== undefined ? formatKM(o.buyCost) : '',
       formatKM(o.totalAmount),
       o.platform,
       o.customerName || '',
@@ -283,6 +288,7 @@ export async function importFromJSON(file: File): Promise<boolean> {
                     size: opt.size ?? null,
                     quantity: opt.quantity,
                     sold_quantity: opt.soldQuantity,
+                    batches: opt.batches,
                   })
                   .select('id')
                   .single();
@@ -327,6 +333,7 @@ export async function importFromJSON(file: File): Promise<boolean> {
             quantity: o.quantity,
             sell_price: o.sellPrice,
             total_amount: o.totalAmount,
+            buy_cost: o.buyCost ?? null,
             platform: o.platform,
             customer_name: o.customerName ?? null,
             notes: o.notes ?? null,
